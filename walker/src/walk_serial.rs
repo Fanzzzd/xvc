@@ -52,13 +52,22 @@ pub fn walk_serial(
         update_ignore_rules(&dir, &ignore_rules)?;
 
         res_paths.extend(get_child_paths(&dir)?.drain(..).filter_map(|p| {
+            if walk_options.ignore_dot_git {
+                if let Some(name) = p.path.file_name() {
+                    if name == ".git" {
+                        return None;
+                    }
+                }
+            }
             let ignore_result = ignore_rules.check(p.path.as_ref());
             match ignore_result {
                 MatchResult::NoMatch | MatchResult::Whitelist => {
                     if p.metadata.is_dir() {
                         dir_stack.push(p.path.clone());
+                        None
+                    } else {
+                        Some(p)
                     }
-                    Some(p)
                 }
                 MatchResult::Ignore => {
                     debug!(output_snd, "Ignored: {:?}", p.path);
@@ -96,6 +105,13 @@ pub fn path_metadata_map_from_file_targets(
 
     res_paths.extend(targets.into_iter().filter_map(|target| {
         let path: PathBuf = target.into();
+        if walk_options.ignore_dot_git {
+            if let Some(name) = path.file_name() {
+                if name == ".git" {
+                    return None;
+                }
+            }
+        }
         let ignore_result = ignore_rules.check(&path);
         match ignore_result {
             MatchResult::NoMatch | MatchResult::Whitelist => {

@@ -1,135 +1,119 @@
-//! Pattern describes a single line in an ignore file and its semantics
-//! It is used to match a path with the given pattern
-use crate::sync;
-pub use error::{Error, Result};
-pub use ignore_rules::IgnoreRules;
-pub use std::hash::Hash;
-pub use sync::{PathSync, PathSyncSingleton};
+use std::path::{Path, PathBuf};
 
-pub use crate::notify::{make_watcher, PathEvent, RecommendedWatcher};
-
-use std::{fmt::Debug, path::PathBuf};
-
-use crate::error;
-use crate::ignore_rules;
-
-/// Show whether a path matches to a glob rule
-#[derive(Debug, Clone)]
+/// The result of matching a path against a set of ignore patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchResult {
-    /// There is no match between glob(s) and path
+    /// The path did not match any pattern.
     NoMatch,
-    /// Path matches to ignored glob(s)
+    /// The path matched an ignore pattern.
     Ignore,
-    /// Path matches to whitelisted glob(s)
+    /// The path matched a whitelist (negation) pattern.
     Whitelist,
 }
 
-/// Is the pattern matches anywhere or only relative to a directory?
+/// Describes how a pattern's path is interpreted.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum PatternRelativity {
-    /// Match the path regardless of the directory prefix
+    /// The pattern can match anywhere in the directory tree.
     Anywhere,
-    /// Match the path if it only starts with `directory`
+    /// The pattern is relative to a specific directory.
     RelativeTo {
-        /// The directory that the pattern must have as prefix to be considered a match
+        /// The directory to which the pattern is relative.
         directory: String,
     },
 }
 
-/// Is the path only a directory, or could it be directory or file?
+/// The type of path a pattern can match.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum PathKind {
-    /// Path matches to directory or file
+    /// The pattern can match a file or a directory.
     Any,
-    /// Path matches only to directory
+    /// The pattern specifically matches a directory.
     Directory,
 }
 
-/// Is this pattern a ignore or whitelist pattern?
+/// The effect of a pattern when it matches a path.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum PatternEffect {
-    /// This is an ignore pattern
+    /// The matched path should be ignored.
     Ignore,
-    /// This is a whitelist pattern
+    /// The matched path should be included (negated ignore).
     Whitelist,
 }
 
-/// Do we get this pattern from a file (.gitignore, .xvcignore, ...) or specify it directly in
-/// code?
+/// The origin of a pattern.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Source {
-    /// Pattern is globally defined in code
+    /// The pattern is from a global configuration.
     Global,
-
-    /// Pattern is obtained from file
+    /// The pattern was read from a file.
     File {
-        /// Path of the pattern file
+        /// The path to the file containing the pattern.
         path: PathBuf,
-        /// (1-based) line number the pattern retrieved
+        /// The line number in the file where the pattern was found.
         line: usize,
     },
-
-    /// Pattern is from CLI
+    /// The pattern was provided via the command line.
     CommandLine {
-        /// Current directory
+        /// The current working directory when the command was invoked.
         current_dir: PathBuf,
     },
 }
 
-/// Pattern is generic and could be an instance of String, Glob, Regex or any other object.
-/// The type is evolved by compiling.
-/// A pattern can start its life as `Pattern<String>` and can be compiled into `Pattern<Glob>` or
-/// `Pattern<Regex>`.
+impl Source {
+    /// Returns the directory path of the source, if applicable.
+    pub fn dir_path(&self) -> Option<PathBuf> {
+        match self {
+            Source::File { path, .. } => path.parent().map(Path::to_path_buf),
+            Source::Global => Some(PathBuf::from("")),
+            Source::CommandLine { current_dir } => Some(current_dir.clone()),
+        }
+    }
+}
+
+/// Represents a single ignore pattern and its properties.
 #[derive(Debug)]
 pub struct Pattern {
-    /// The pattern type
+    /// The compiled glob pattern string.
     pub glob: String,
-    /// The original string that defines the pattern
+    /// The original, unmodified pattern string.
     pub original: String,
-    /// Where did we get this pattern?
+    /// The source of the pattern.
     pub source: Source,
-    /// Is this ignore or whitelist pattern?
+    /// The effect of the pattern (ignore or whitelist).
     pub effect: PatternEffect,
-    /// Does it have an implied prefix?
+    /// The relativity of the pattern's path.
     pub relativity: PatternRelativity,
-    /// Is the path a directory or anything?
+    /// The kind of path this pattern applies to (file, directory, or any).
     pub path_kind: PathKind,
 }
 
 impl Pattern {
-    /// Create a new pattern from a string and its source
+    /// Creates a new `Pattern` from a source and an original string.
     pub fn new(source: Source, original: &str) -> Self {
-        let original = original.to_owned();
-        let current_dir = match &source {
+        let original_owned = original.to_owned();
+        let mut current_dir = match &source {
             Source::Global => "".to_string(),
             Source::File { path, .. } => {
-                let path = path
-                    .parent()
-                    .expect("Pattern source file doesn't have parent")
-                    .to_string_lossy()
-                    .to_string();
-                if path.starts_with('/') {
-                    path
-                } else {
-                    format!("/{path}")
-                }
+                let parent = path.parent().unwrap_or_else(|| "".as_ref());
+                parent.to_string_lossy().to_string()
             }
             Source::CommandLine { current_dir } => current_dir.to_string_lossy().to_string(),
         };
 
-        // if Pattern starts with ! it's whitelist, if ends with / it's dir only, if it contains
-        // non final slash, it should be considered under the current dir only, otherwise it
-        // matches
+        if current_dir.ends_with('/') {
+            current_dir = current_dir[..current_dir.len() - 1].to_string();
+        }
 
         let begin_exclamation = original.starts_with('!');
-        let mut line = if begin_exclamation || original.starts_with(r"\!") {
+        let mut line = if original.starts_with(r"\!") {
+            original[1..].to_owned()
+        } else if begin_exclamation {
             original[1..].to_owned()
         } else {
             original.to_owned()
         };
 
-        // TODO: We should handle filenames with trailing spaces better, with regex match and removing
-        // the \\ from the name
         if !line.ends_with("\\ ") {
             line = line.trim_end().to_string();
         }
@@ -140,21 +124,11 @@ impl Pattern {
         }
 
         let begin_slash = line.starts_with('/');
-        let non_final_slash = if !line.is_empty() {
-            line[..line.len() - 1].chars().any(|c| c == '/')
-        } else {
-            false
-        };
-
         if begin_slash {
             line = line[1..].to_string();
         }
 
-        let current_dir = if current_dir.ends_with('/') {
-            &current_dir[..current_dir.len() - 1]
-        } else {
-            &current_dir
-        };
+        let contains_slash = line.contains('/');
 
         let effect = if begin_exclamation {
             PatternEffect::Whitelist
@@ -162,25 +136,43 @@ impl Pattern {
             PatternEffect::Ignore
         };
 
-        let path_kind = if end_slash {
+        let mut path_kind = if end_slash {
             PathKind::Directory
         } else {
             PathKind::Any
         };
 
-        let relativity = if non_final_slash {
+        if line.ends_with("**") {
+            path_kind = PathKind::Directory;
+        }
+
+        let relativity = if begin_slash || contains_slash {
             PatternRelativity::RelativeTo {
-                directory: current_dir.to_owned(),
+                directory: current_dir.clone(),
             }
         } else {
             PatternRelativity::Anywhere
         };
 
-        let glob = transform_pattern_for_glob(&line, relativity.clone(), path_kind.clone());
+        let mut glob = if begin_slash || contains_slash {
+            if current_dir.is_empty() {
+                line.to_string()
+            } else {
+                format!("{current_dir}/{line}")
+            }
+        } else if current_dir.is_empty() {
+            format!("**/{line}")
+        } else {
+            format!("{current_dir}/**/{line}")
+        };
+
+        if path_kind == PathKind::Directory {
+            glob.push('/');
+        }
 
         Pattern {
             glob,
-            original,
+            original: original_owned,
             source,
             effect,
             relativity,
@@ -189,29 +181,7 @@ impl Pattern {
     }
 }
 
-fn transform_pattern_for_glob(
-    original: &str,
-    relativity: PatternRelativity,
-    path_kind: PathKind,
-) -> String {
-    let anything_anywhere = |p| format!("**/{p}");
-    let anything_relative = |p, directory| format!("{directory}/**/{p}");
-    let directory_anywhere = |p| format!("**/{p}/**");
-    let directory_relative = |p, directory| format!("{directory}/**/{p}/**");
-
-    match (path_kind, relativity) {
-        (PathKind::Any, PatternRelativity::Anywhere) => anything_anywhere(original),
-        (PathKind::Any, PatternRelativity::RelativeTo { directory }) => {
-            anything_relative(original, directory)
-        }
-        (PathKind::Directory, PatternRelativity::Anywhere) => directory_anywhere(original),
-        (PathKind::Directory, PatternRelativity::RelativeTo { directory }) => {
-            directory_relative(original, directory)
-        }
-    }
-}
-
-/// Build a list of patterns from a list of strings
+/// Builds a list of `Pattern`s from a vector of strings.
 pub fn build_pattern_list(patterns: Vec<String>, source: Source) -> Vec<Pattern> {
     patterns
         .iter()

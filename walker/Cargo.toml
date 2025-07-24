@@ -17,8 +17,6 @@ crate-type = ["rlib"]
 
 [dependencies]
 xvc-logging = { version = "0.6.17", path = "../logging" }
-# NOTE: 0.4 removes Glob struct and this should be handled with care
-fast-glob = "^0.3"
 
 ## Parallelization
 crossbeam-channel = "^0.5"
@@ -40,10 +38,12 @@ peak_alloc = "^0.2"
 ## Misc
 itertools = "^0.14"
 regex = "^1.10"
+arrayvec = "^0.7"
 
 [dev-dependencies]
 xvc-test-helper = { path = "../test_helper/", version = "0.6.17" }
 test-case = "^3.3"
+git2 = "0.20.2"
 
 [package.metadata.cargo-udeps.ignore]
 normal = ["xvc-logging", "test-case"]

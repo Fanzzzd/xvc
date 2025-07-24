@@ -58,7 +58,7 @@ pub use xvc_walker::Result as XvcWalkerResult;
 
 pub use xvc_walker::{
     content_to_patterns, make_polling_watcher, path_metadata_map_from_file_targets, walk_parallel,
-    walk_serial, AbsolutePath, Glob, IgnoreRules, MatchResult, PathEvent, PathSync, WalkOptions,
+    walk_serial, AbsolutePath, IgnoreRules, MatchResult, PathEvent, PathSync, WalkOptions,
 };
 
 pub use xvc_config::error::Error as XvcConfigError;
